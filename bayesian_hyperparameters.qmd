@@ -1,0 +1,297 @@
+---
+format: 
+  html:
+    code-fold: true
+jupyter: python3
+highlight-style: github
+---
+
+## Motivation
+
+I recently became interested in Bayesian optimization as a powerful strategy for hyperparameter tuning, especially in scenarios where there are several hyperparameters that interact in complex ways. This makes it particularly appealing for models like XGBoost, LightGBM, and CatBoost as they rely heavily on careful tuning for optimal performance.
+
+I'm particularly interested in using the `optuna` library due to its flexibility, support for early stopping, and rich feature set. While I’m aware of alternatives like `scikit-optimize`’s `BayesSearchCV`, `optuna` offers greater customization and more intuitive control. Additionally, I believe that skills developed with `optuna` will transfer more easily to other frameworks than the reverse.
+
+
+
+
+## The HIGGS dataset
+
+The HIGGS dataset is a binary classification dataset originally developed for high-energy physics research and later adopted in machine learning competitions. It contains 28 continuous features derived from simulated particle collisions, and the target variable indicates whether an event corresponds to a Higgs Boson decay.
+
+I selected this dataset because of its large size, which makes it ideal for testing hyperparameter optimization strategies on computationally intensive models. While I don’t fully understand the meaning of each variable, that’s not the goal of this analysis. The dataset serves well as a realistic, high-volume benchmark for tuning performance.
+
+Here's a snapshot of the dataset:
+
+```{python data_libraries}
+#| echo: false
+
+import os, io, gc
+import polars as pl
+import panel as pn
+import seaborn as sns
+from matplotlib import pyplot as plt
+from jinja2 import Template
+from IPython.display import HTML, display
+```
+
+```{python load_data}
+#| echo: false
+
+
+if not os.path.exists('./higgs_data/HIGGS.parquet'):
+    from download_data import main as download_data
+    download_data()
+    
+df = pl.scan_parquet('./higgs_data/HIGGS.parquet')
+df.head(10).collect()
+```
+
+### Higgs Boson Variable
+
+Below we can observe the distribution of the target variable. It's almost equally balanced, with 52% of the events corresponding to a Higgs Boson decay and 48% of the events not corresponding to a Higgs Boson decay.
+
+```{python}
+#| echo: false
+#| out-width: "70%"
+#| fig-align: center
+
+
+plotting_df = (
+    df.with_columns([
+        pl.when(pl.col("target") == 0).then(pl.lit("No"))
+         .when(pl.col("target") == 1).then(pl.lit("Yes"))
+         .otherwise(pl.lit("Unknown"))
+         .alias("Higgs Boson Decay")
+    ])
+    .collect()
+)
+
+counts = plotting_df.group_by('Higgs Boson Decay').len()
+
+palette = {"Yes": "#4caf50", "No": "#f44336"}
+plt.figure(figsize=(8, 6))
+
+ax = sns.barplot(x="Higgs Boson Decay", y="len", hue="Higgs Boson Decay", 
+                 data=counts, legend=False, palette=palette)
+
+# Add count labels on top of bars
+for bar in ax.patches:
+    count = int(bar.get_height())
+    ax.annotate(
+        f"{count:,}",  # comma formatting
+        xy=(bar.get_x() + bar.get_width() / 2, bar.get_height()),
+        xytext=(0, 5),
+        textcoords="offset points",
+        ha="center", va="bottom",
+        fontsize=12, fontweight="bold"
+    )
+
+
+plt.title("Counts of Higgs Boson Decay", fontsize=16)
+plt.xlabel("Higgs Boson Decay", fontsize=14)
+plt.ylabel("Count", fontsize=14)
+plt.xticks(fontsize=12)
+plt.yticks(fontsize=12)
+plt.ticklabel_format(style='plain', axis='y')  
+plt.grid(True, axis="y", linestyle="--", alpha=0.3)
+plt.tight_layout()
+plt.show()
+```
+
+### Higgs Boson Variable
+
+Below is a dropdown menu that lets you explore the distribution of each predictor variable, separated by whether or not a Higgs boson decay occurred. For efficiency, these plots are based on a subsample of 50,000 observations.
+
+At first glance, there are no major differences in the distributions of the predictors between the two outcome classes. This suggests that any signal present is likely subtle and embedded in complex, multidimensional interactions. Gradient Boosting Machines are a strong choice for this task.
+
+```{python, boxplot_violin}
+#| echo: false
+
+
+import seaborn as sns
+import matplotlib.pyplot as plt
+import numpy as np
+
+def boxplot_violin(
+    data, x, y,
+    title="Half Violin + Boxplot",
+    palette="Set2",
+    bw_adjust=0.3,
+    violin_side="right",  # or "left"
+    ax=None
+):
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(10, 6))
+
+    categories = data[x].unique()
+
+    if type(palette) == str:
+        pal = sns.color_palette(palette, len(categories))
+    elif type(palette) == list or type(palette) == dict:
+        pal = palette
+    else:
+        raise ValueError("palette must be a string or a list or a dict")
+
+    # Violin plot
+    sns.violinplot(
+        data=data,
+        x=x, y=y,
+        hue=x,
+        palette=pal,
+        inner=None,
+        cut=0,
+        bw_adjust=bw_adjust,
+        linewidth=0,
+        legend=False,
+        ax=ax,
+    )
+
+    # Clip to half and add outlines
+    for artist in ax.collections:
+        path = artist.get_paths()[0]
+        vertices = path.vertices
+        mean_x = np.mean(vertices[:, 0])
+        if violin_side == "right":
+            vertices[:, 0] = np.where(vertices[:, 0] < mean_x, mean_x, vertices[:, 0])
+        elif violin_side == "left":
+            vertices[:, 0] = np.where(vertices[:, 0] > mean_x, mean_x, vertices[:, 0])
+        else:
+            raise ValueError("violin_side must be 'right' or 'left'")
+        artist.set_edgecolor("black")
+        artist.set_linewidth(0.5)
+
+    # Boxplot — same trick
+    sns.boxplot(
+        data=data,
+        x=x, y=y,
+        hue=x,
+        palette=pal,
+        width=0.05,
+        boxprops={ 'edgecolor': 'black', 'linewidth': 1.2 },
+        capprops={ 'color': 'black', 'linewidth': 1 },
+        whiskerprops={ 'color': 'black', 'linewidth': 1 },
+        flierprops={ 'markeredgecolor': 'black', 'markersize': 3 },
+        medianprops={ 'color': 'black', 'linewidth': 1 },
+        legend=False,
+        ax=ax,
+    )
+
+    ax.set_title(title)
+    ax.legend_.remove() if ax.get_legend() else None
+    return ax
+```
+```{python}
+#| echo: false
+
+plotting_df = plotting_df.sample(n=50_000, with_replacement=False).to_pandas()
+
+# List of numeric features 
+features = [col for col in plotting_df.columns if col not in ("target", "Higgs Boson Decay")]
+
+
+for feature in features:
+    fig, ax = plt.subplots(figsize=(6, 4))
+    title = f'Distribution of {feature}\nby Higgs Boson Decay'
+    boxplot_violin(
+        x="Higgs Boson Decay", y=feature, 
+        data=plotting_df, 
+        ax=ax, 
+        title=title,
+        palette=palette,
+    )
+    plt.tight_layout()
+    plt.savefig(f"./plots/boxplotviolins/{feature}.png", dpi=300)
+    plt.close(fig)
+```
+
+```{python}
+#| results: asis
+#| echo: false
+
+
+template = Template("""
+<div class="mb-3" style="max-width: 300px;">
+  <label for="feature-select" class="form-label">Select a feature:</label>
+  <select id="feature-select" class="form-select">
+    {% for f in features %}
+      <option value="{{ f }}">{{ f }}</option>
+    {% endfor %}
+  </select>
+</div>
+
+<div id="plot-container">
+  {% for f in features %}
+  <img src="plots/boxplotviolins/{{ f }}.png"
+       class="plot"
+       id="plot-{{ f }}"
+       style="display: {% if loop.first %}block{% else %}none{% endif %}; margin: 0 auto; width: 70%;" />
+  {% endfor %}
+</div>
+
+<script>
+  const select = document.getElementById("feature-select");
+  const plots = document.querySelectorAll(".plot");
+
+  select.addEventListener("change", () => {
+    plots.forEach(p => p.style.display = "none");
+    const selected = document.getElementById(`plot-${select.value}`);
+    if (selected) selected.style.display = "block";
+  });
+</script>
+""")
+
+display(HTML(template.render(features=features)))
+```
+
+## Methodology
+
+To make the most of Bayesian optimization, I structured the process into three stages. Across all stages, I applied a few consistent strategies:
+
+- Subsampling the dataset for faster iteration and experimentation.
+- Using a single train/validation split rather than cross-validation. While cross-validation is more robust for model selection, this project is focused on exploring Bayesian optimization techniques rather than identifying a definitive best model. For future, more rigorous applications, I plan to incorporate cross-validation.
+- Employing pruners to stop trials early when no further improvement is observed. This improves efficiency and allows more trials to be completed within the same time budget.  
+  - Note: CatBoost's API currently does not work well with Optuna's pruning mechanisms, so pruning was disabled for CatBoost experiments.
+
+### Stages
+
+1. Coarse, Broad Search  
+   - Subsample 10% of the data.  
+   - Run 100 Optuna trials to identify which hyperparameters are most impactful.  
+   - Use 100 boosting rounds for fast feedback.  
+   - Use a `MedianPruner` for gentle early stopping.  
+   - Purpose: Narrow the search space by identifying influential parameters.
+
+2. Fine, Narrow Search  
+   - Subsample 20% of the data.  
+   - Focus on tuning the most important hyperparameters identified in Stage 1, along with key regularization parameters.  
+   - Run 50 Optuna trials with a more focused search space.  
+   - Increase to 1000 boosting rounds for more thorough learning.  
+   - Use a `SuccessiveHalvingPruner` to speed up the search while still exploring promising trials.
+
+3. Fit Final Model  
+   - Use the full dataset.  
+   - Train a final model using the best hyperparameters found in Stage 2.  
+   - Evaluate final performance on a held-out test set.
+   - Compare against an untuned model to assess the impact of hyperparameter tuning.
+
+## Tuning The Models
+
+::: {.panel-tabset}
+
+### XGBoost
+
+
+
+### LightGBM
+
+
+
+### CatBoost
+
+
+
+:::
+
+## Results
+
