@@ -1,1 +1,4 @@
 ./higgs_data/*
+./training/*
+./__pycache__/*
+./catboost_info/*
