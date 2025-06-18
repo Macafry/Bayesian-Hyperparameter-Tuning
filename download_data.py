@@ -12,8 +12,8 @@ def main():
     url = 'https://archive.ics.uci.edu/static/public/280/higgs.zip'
     response = requests.get(url, stream=True)
     
-    # 2.7 GB in bytes = 2.7 * 1024^3 = 2,899,705,856
-    default_size_bytes = int(2.7 * 1024 ** 3)
+    # 2.63 GB in bytes = 2.63 * 1024^3 
+    default_size_bytes = int(2.63 * 1024 ** 3)
     total_size = int(response.headers.get('content-length', default_size_bytes))
     block_size = 1024  
 
@@ -52,7 +52,7 @@ def main():
     df = df.rename(dict(zip(df.columns, columns)))
         
     # Save as feather format
-    df.write_ipc('./higgs_data/HIGGS.feather', compression='zstd')
+    df.write_parquet('./higgs_data/HIGGS.parquet')
     
     # Clean-up
     os.remove('higgs.zip')
