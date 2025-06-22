@@ -26,11 +26,11 @@ Here's a snapshot of the dataset:
 ```{python data_libraries}
 #| echo: false
 
-import os, io, gc
+import os, gc
 import polars as pl
-import panel as pn
-import seaborn as sns
 from matplotlib import pyplot as plt
+import seaborn as sns
+import numpy as np
 from jinja2 import Template
 from IPython.display import HTML, display
 
@@ -46,7 +46,7 @@ if not os.path.exists('./higgs_data/HIGGS.parquet') or FORCE_RERUN:
     download_data()
     
 df = pl.scan_parquet('./higgs_data/HIGGS.parquet')
-df.head(10).collect()
+df.head(10).collect().to_pandas().to_html()
 ```
 
 ### Higgs Boson Variable
@@ -101,7 +101,7 @@ plt.tight_layout()
 plt.show()
 ```
 
-### Higgs Boson Variable
+### Higgs Boson Variable vs Predictor Variables
 
 Below is a dropdown menu that lets you explore the distribution of each predictor variable, separated by whether or not a Higgs boson decay occurred. For efficiency, these plots are based on a subsample of 50,000 observations.
 
@@ -109,11 +109,6 @@ At first glance, there are no major differences in the distributions of the pred
 
 ```{python, boxplot_violin}
 #| echo: false
-
-
-import seaborn as sns
-import matplotlib.pyplot as plt
-import numpy as np
 
 def boxplot_violin(
     data, x, y,
@@ -371,8 +366,10 @@ def print_study(study):
 ```
 
 ```{python}
+#| echo: false
+
 def new_range(trial, previous_study, param, 
-              margin=0.3, lower_bound=None, upper_bound=None):
+              margin=0.2, lower_bound=None, upper_bound=None):
 
     value = previous_study.best_params[param]
     low = value * (1 - margin) 
@@ -403,6 +400,8 @@ def new_range(trial, previous_study, param,
 #### Stage 1
 
 ```{python}
+#| code-summary: "Initial Tuning Trial for XGBoost models"
+
 def xgb_objective_stage1(trial):
     params = {
         "tree_method": "hist", 
@@ -418,8 +417,8 @@ def xgb_objective_stage1(trial):
         "min_child_weight": trial.suggest_float("min_child_weight", 0.1, 10.0, log=True),
     }
 
-    split_folder = 'train/xgboost/step1/data'
-    nested_folder = 'train/xgboost/step1/data/training'
+    split_folder = 'train/xgboost/stage1/data'
+    nested_folder = 'train/xgboost/stage1/data/training'
     
     subsample = file_subsample(f'higgs_data/train.parquet', split_folder, sample_fraction=0.1)
     train_valid_pool, holdout_set = file_train_test_split(subsample, split_folder, test_size=0.15)
@@ -449,13 +448,8 @@ def xgb_objective_stage1(trial):
 
     dtest = xgb.DMatrix(f"{holdout_set}?format=csv&label_column=0")
     preds = model.predict(dtest)
-    auc = roc_auc_score(dtest.get_label(), preds)
 
-    # Free up memory
-    del model, dtrain, dvalid, dtest, preds
-    gc.collect()
-
-    return auc
+    return roc_auc_score(dtest.get_label(), preds)
 ```
 
 ```{python}
@@ -473,7 +467,7 @@ else:
         pruner=MedianPruner(n_warmup_steps=20, interval_steps=5),
     )
 
-    xgb_study1.optimize(xgb_objective_stage1, n_trials=100)
+    xgb_study1.optimize(xgb_objective_stage1, n_trials=100, gc_after_trial=True)
 
     with open("studies/xgb_stage1.pkl", "wb") as f:
         pickle.dump(xgb_study1, f)
@@ -483,13 +477,13 @@ print_study(xgb_study1)
 
 #### Stage 2
 
-
-
 ```{python}
+#| code-summary: "Second, Narrower Tuning Trial for XGBoost models"
+
 def xgb_objective_stage2(trial):
     params = {
         "tree_method": "hist", 
-        "device": "cuda",
+        # "device": "cuda", # my system doesn't have enough VRAM
         "objective": "binary:logistic",
         "eval_metric": "auc",
         
@@ -498,15 +492,15 @@ def xgb_objective_stage2(trial):
 
         # Hyperparameters to tune further
         "max_depth": new_range(trial, xgb_study1, "max_depth"),
-        "subsample": new_range(trial, xgb_study1, "subsample"),
+        "subsample": new_range(trial, xgb_study1, "subsample", upper_bound=1.0),
         "colsample_bytree": new_range(trial, xgb_study1, "colsample_bytree", upper_bound=1.0),
         "lambda": new_range(trial, xgb_study1, "lambda"),
         "alpha": new_range(trial, xgb_study1, "alpha"),
         "min_child_weight": new_range(trial, xgb_study1, "min_child_weight"),
     }
 
-    split_folder = 'train/xgboost/step2/data'
-    nested_folder = 'train/xgboost/step2/data/training'
+    split_folder = 'train/xgboost/stage2/data'
+    nested_folder = 'train/xgboost/stage2/data/training'
     
     subsample = file_subsample(f'higgs_data/train.parquet', split_folder, sample_fraction=0.2)
     train_valid_pool, holdout_set = file_train_test_split(subsample, split_folder, test_size=0.15)
@@ -516,7 +510,6 @@ def xgb_objective_stage2(trial):
     train_set = csv_no_headers(train_set)
     valid_set = csv_no_headers(valid_set)
     holdout_set = csv_no_headers(holdout_set)
-
 
     dtrain = xgb.DMatrix(f"{train_set}?format=csv&label_column=0")
     dvalid = xgb.DMatrix(f"{valid_set}?format=csv&label_column=0")
@@ -536,13 +529,8 @@ def xgb_objective_stage2(trial):
 
     dtest = xgb.DMatrix(f"{holdout_set}?format=csv&label_column=0")
     preds = model.predict(dtest)
-    auc = roc_auc_score(dtest.get_label(), preds)
-
-    # Free up memory
-    del model, dtrain, dvalid, dtest, preds
-    gc.collect()
-
-    return auc
+    
+    return roc_auc_score(dtest.get_label(), preds)
 ```
 
 ```{python}
@@ -559,7 +547,7 @@ else:
         pruner = SuccessiveHalvingPruner(min_resource=100, reduction_factor=3),
     )
 
-    xgb_study2.optimize(xgb_objective_stage2, n_trials=50)
+    xgb_study2.optimize(xgb_objective_stage2, n_trials=50, gc_after_trial=True)
 
     with open("studies/xgb_stage2.pkl", "wb") as f:
         pickle.dump(xgb_study2, f)
@@ -571,54 +559,58 @@ print_study(xgb_study2)
 #### Stage 3
 
 ```{python}
+#| code-summary: "Final fitting for XGBoost model"
+
 def xgb_objective_stage3(best_params):
     params = {
         "tree_method": "hist", 
-        "device": "cuda",
+        # "device": "cuda", # my system doesn't have enough VRAM
         "objective": "binary:logistic",
         "eval_metric": "auc",
     }
 
-    split_folder = 'train/xgboost/step3/data'
-    nested_folder = 'train/xgboost/step3/data/training'
+    split_folder = 'train/xgboost/stage3/data'
 
     train_set, valid_set  = file_train_test_split(f'higgs_data/train.parquet', split_folder, test_size=0.2)
 
     # Ensure no headers in the csv files for XGBoost
     train_set = csv_no_headers(train_set)
     valid_set = csv_no_headers(valid_set)
-    holdout_set = csv_no_headers(holdout_set)
-
 
     dtrain = xgb.DMatrix(f"{train_set}?format=csv&label_column=0")
     dvalid = xgb.DMatrix(f"{valid_set}?format=csv&label_column=0")
 
-    baseline_model = xgb.train(
-        params,
-        dtrain,
-        num_boost_round=1000,
-        evals=[(dvalid, "validation")],
-        early_stopping_rounds=50,
-    )
+    # Absolutely no logging
+    with open(os.devnull, 'w') as fnull:
+        with redirect_stdout(fnull), redirect_stderr(fnull):
+            baseline_model = xgb.train(
+                params,
+                dtrain,
+                num_boost_round=1000,
+                evals=[(dvalid, "validation")],
+                early_stopping_rounds=50,
+            )
 
     baseline_model.save_model("models/baseline_xgb.json")
 
-    tuned_model = xgb.train(
-        params.update(best_params),
-        dtrain,
-        num_boost_round=1000,
-        evals=[(dvalid, "validation")],
-        early_stopping_rounds=50,
-    )
+    params.update(best_params)
+    # Absolutely no logging
+    with open(os.devnull, 'w') as fnull:
+        with redirect_stdout(fnull), redirect_stderr(fnull):
+            tuned_model = xgb.train(
+                params,
+                dtrain,
+                num_boost_round=1000,
+                evals=[(dvalid, "validation")],
+                early_stopping_rounds=50,
+            )
 
     tuned_model.save_model("models/tuned_xgb.json")
 ```
 
 ```{python}
 #| echo: false
-#| eval: false
 
-best_params = xgb_study1.best_params.update(xgb_study2.best_params)
 
 conditions = [
     not os.path.exists("models/baseline_xgb.json"), 
@@ -627,7 +619,7 @@ conditions = [
 ]
 
 if any(conditions):
-    xgb_objective_stage3(best_params)
+    xgb_objective_stage3(xgb_study2.best_params)
 
 _ = gc.collect()
 ```
@@ -636,6 +628,8 @@ _ = gc.collect()
 
 #### Stage 1
 ```{python}
+#| code-summary: "Initial Tuning Trial for LightGBM models"
+
 def lgb_objective_stage1(trial):
     params = {
         "device": "gpu",
@@ -657,8 +651,8 @@ def lgb_objective_stage1(trial):
         "min_child_samples": trial.suggest_int("min_child_samples", 10, 100),
     }
 
-    split_folder = 'train/lightgbm/step1/data'
-    nested_folder = 'train/lightgbm/step1/data/training'
+    split_folder = 'train/lightgbm/stage1/data'
+    nested_folder = 'train/lightgbm/stage1/data/training'
     
     # train (70) / valid (15) / test (15) split from 10% subsample
     subsample = file_subsample(f'higgs_data/train.parquet', split_folder, sample_fraction=0.1)
@@ -691,14 +685,8 @@ def lgb_objective_stage1(trial):
     y_test = dtest["target"]
 
     preds = model.predict(X_test, num_iteration=model.best_iteration)
-    auc = roc_auc_score(y_test, preds)
-        
     
-    # Free up memory
-    del model, dtrain, dvalid, X_test, y_test, preds
-    gc.collect()
-
-    return auc
+    return roc_auc_score(y_test, preds)
 ```
 
 ```{python}
@@ -716,7 +704,7 @@ else:
         pruner=MedianPruner(n_warmup_steps=20, interval_steps=5),
     )
 
-    lgb_study1.optimize(lgb_objective_stage1, n_trials=100)
+    lgb_study1.optimize(lgb_objective_stage1, n_trials=100, gc_after_trial=True)
 
     with open("studies/lgb_stage1.pkl", "wb") as f:
         pickle.dump(lgb_study1, f)
@@ -728,6 +716,8 @@ print_study(lgb_study1)
 #### Stage 2
 
 ```{python}
+#| code-summary: "Second, Narrower Tuning Trial for LightGBM models"
+
 def lgb_objective_stage2(trial):
     params = {
         "device": "gpu",
@@ -745,7 +735,6 @@ def lgb_objective_stage2(trial):
         # Hyperparameters to tune further
         "max_depth": new_range(trial, lgb_study1, "max_depth"),
         "num_leaves": new_range(trial, lgb_study1, "num_leaves"),
-        "learning_rate": new_range(trial, lgb_study1, "learning_rate"),
         "feature_fraction": new_range(trial, lgb_study1, "feature_fraction", upper_bound=1.0),
         "bagging_fraction": new_range(trial, lgb_study1, "bagging_fraction", upper_bound=1.0),
         "bagging_freq": new_range(trial, lgb_study1, "bagging_freq"),
@@ -754,8 +743,8 @@ def lgb_objective_stage2(trial):
         "min_child_samples": new_range(trial, lgb_study1, "min_child_samples"),
     }
 
-    split_folder = 'train/lightgbm/step2/data'
-    nested_folder = 'train/lightgbm/step2/data/training'
+    split_folder = 'train/lightgbm/stage2/data'
+    nested_folder = 'train/lightgbm/stage2/data/training'
     
     # train (70) / valid (15) / test (15) split from 20% subsample
     subsample = file_subsample('higgs_data/train.parquet', split_folder, sample_fraction=0.2)
@@ -788,14 +777,8 @@ def lgb_objective_stage2(trial):
     y_test = dtest["target"]
 
     preds = model.predict(X_test, num_iteration=model.best_iteration)
-    auc = roc_auc_score(y_test, preds)
-        
     
-    # Free up memory
-    del model, dtrain, dvalid, X_test, y_test, preds
-    gc.collect()
-
-    return auc
+    return roc_auc_score(y_test, preds)
 ```
 
 ```{python}
@@ -812,7 +795,7 @@ else:
         pruner = SuccessiveHalvingPruner(min_resource=100, reduction_factor=3),
     )
 
-    lgb_study2.optimize(lgb_objective_stage2, n_trials=50)
+    lgb_study2.optimize(lgb_objective_stage2, n_trials=50, gc_after_trial=True)
 
     with open("studies/lgb_stage2.pkl", "wb") as f:
         pickle.dump(lgb_study2, f)
@@ -822,6 +805,8 @@ print_study(lgb_study2)
 
 #### Stage 3
 ```{python}
+#| code-summary: "Final fitting for LightGBM model"
+
 def lgb_objective_stage3(best_params):
     params = {
         "device": "gpu",
@@ -833,8 +818,7 @@ def lgb_objective_stage3(best_params):
         "tree_learner": "serial",
     }
 
-    split_folder = 'train/lightgbm/step3/data'
-    nested_folder = 'train/lightgbm/step3/data/training'
+    split_folder = 'train/lightgbm/stage3/data'
 
     # train (80) / valid (20)  split from full training set
     train_set, valid_set = file_train_test_split('higgs_data/train.parquet', split_folder, test_size=0.20)
@@ -842,37 +826,42 @@ def lgb_objective_stage3(best_params):
     dtrain = lgb.Dataset(train_set, params={"label_column": "name:target", "header": True})
     dvalid = lgb.Dataset(valid_set, params={"label_column": "name:target", "header": True}, reference=train_set)
 
-
-    baseline_model = lgb.train(
-        params,
-        dtrain,
-        valid_sets=[dvalid],
-        num_boost_round=1000,
-        callbacks=[
-            lgb.early_stopping(50),
-        ],
-    )
+    with open(os.devnull, 'w') as fnull:
+        with redirect_stdout(fnull), redirect_stderr(fnull):
+            baseline_model = lgb.train(
+                params,
+                dtrain,
+                valid_sets=[dvalid],
+                num_boost_round=1000,
+                callbacks=[
+                    lgb.early_stopping(50),
+                ],
+            )
 
     baseline_model.save_model("models/baseline_lgb.txt", num_iteration=baseline_model.best_iteration)
 
-    tuned_model = lgb.train(
-        params.update(best_params),
-        dtrain,
-        valid_sets=[dvalid],
-        num_boost_round=1000,
-        callbacks=[
-            lgb.early_stopping(50),
-        ],
-    )
+    params.update(best_params)
+
+    with open(os.devnull, 'w') as fnull:
+        with redirect_stdout(fnull), redirect_stderr(fnull):
+            tuned_model = lgb.train(
+                params,
+                dtrain,
+                valid_sets=[dvalid],
+                num_boost_round=1000,
+                callbacks=[
+                    lgb.early_stopping(50),
+                ],
+            )
 
     tuned_model.save_model("models/tuned_lgb.txt", num_iteration=tuned_model.best_iteration)
 ```
 
 ```{python}
 #| echo: false
-#| eval: false
 
-best_params = lgb_study1.best_params.update(lgb_study2.best_params)
+
+best_params = {**lgb_study1.best_params, **lgb_study2.best_params}
 
 conditions = [
     not os.path.exists("models/baseline_lgb.txt"), 
@@ -892,6 +881,8 @@ _ = gc.collect()
 #### Stage 1
 
 ```{python}
+#| code-summary: "Initial Tuning Trial for CatBoost models"
+
 def cat_objective_stage1(trial):
     params = {
         "task_type": "GPU",
@@ -901,6 +892,7 @@ def cat_objective_stage1(trial):
         "early_stopping_rounds": 15,
         "iterations": 100,
         "verbose": 0,
+        "use_best_model": True,
         "depth": trial.suggest_int("depth", 3, 12),
         "learning_rate": trial.suggest_float("learning_rate", 1e-3, 0.3, log=True),
         "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 0, 5.0),
@@ -909,8 +901,8 @@ def cat_objective_stage1(trial):
         "border_count": trial.suggest_int("border_count", 32, 255),
     }
 
-    split_folder = 'training/catboost/step1/data'
-    nested_folder = 'training/catboost/step1/data/training'
+    split_folder = 'training/catboost/stage1/data'
+    nested_folder = 'training/catboost/stage1/data/training'
     cd_file = './higgs_data/train.cd'
 
     subsample = file_subsample('higgs_data/train.parquet', split_folder, sample_fraction=0.1)
@@ -933,12 +925,8 @@ def cat_objective_stage1(trial):
     # Evaluate on holdout set
     preds = model.predict_proba(dtest)[:, 1]
     y_test = pd.read_csv(holdout_set, usecols=["target"])
-    auc = roc_auc_score(y_test, preds)
-
-    del model, dtrain, dvalid, dtest, y_test, preds
-    gc.collect()
-
-    return auc
+    
+    return roc_auc_score(y_test, preds)
 ```
 
 ```{python}
@@ -956,7 +944,7 @@ else:
         # no pruner for catboost
     )
 
-    cat_study1.optimize(cat_objective_stage1, n_trials=100)
+    cat_study1.optimize(cat_objective_stage1, n_trials=100, gc_after_trial=True)
 
     with open("studies/cat_stage1.pkl", "wb") as f:
         pickle.dump(cat_study1, f)
@@ -967,6 +955,8 @@ print_study(cat_study1)
 #### Stage 2
 
 ```{python}
+#| code-summary: "Second, Narrower Tuning Trial for CatBoost models"
+
 def cat_objective_stage2(trial):
     params = {
         "task_type": "GPU",
@@ -976,19 +966,20 @@ def cat_objective_stage2(trial):
         "early_stopping_rounds": 50,
         "iterations": 1000,
         "verbose": 0,
+        "use_best_model": True,
 
         "learning_rate": trial.suggest_float("learning_rate", 1e-3, 0.3, log=True),
         
         "depth": new_range(trial, cat_study1, "depth"),
 
-        "l2_leaf_reg": cat_study1.best_params["l2_leaf_reg"],
-        "bagging_temperature": cat_study1.best_params["bagging_temperature"],
-        "random_strength": cat_study1.best_params["random_strength"],
-        "border_count": cat_study1.best_params["border_count"],
+        "l2_leaf_reg": new_range(trial, cat_study1, "l2_leaf_reg"),
+        "bagging_temperature": new_range(trial, cat_study1, "bagging_temperature"),
+        "random_strength": new_range(trial, cat_study1, "random_strength"),
+        "border_count": new_range(trial, cat_study1, "border_count"),
     }
 
-    split_folder = 'training/catboost/step2/data'
-    nested_folder = 'training/catboost/step2/data/training'
+    split_folder = 'training/catboost/stage2/data'
+    nested_folder = 'training/catboost/stage2/data/training'
     cd_file = './higgs_data/train.cd'
 
     subsample = file_subsample('higgs_data/train.parquet', split_folder, sample_fraction=0.2)
@@ -1011,12 +1002,8 @@ def cat_objective_stage2(trial):
     # Evaluate on holdout set
     preds = model.predict_proba(dtest)[:, 1]
     y_test = pd.read_csv(holdout_set, usecols=["target"])
-    auc = roc_auc_score(y_test, preds)
-
-    del model, dtrain, dvalid, dtest, y_test, preds
-    gc.collect()
-
-    return auc
+    
+    return roc_auc_score(y_test, preds)
 ```
 
 ```{python}
@@ -1033,7 +1020,7 @@ else:
         # no pruner for catboost
     )
 
-    cat_study2.optimize(cat_objective_stage2, n_trials=50)
+    cat_study2.optimize(cat_objective_stage2, n_trials=50, gc_after_trial=True)
 
     with open("studies/cat_stage2.pkl", "wb") as f:
         pickle.dump(cat_study2, f)
@@ -1041,7 +1028,137 @@ else:
 print_study(cat_study2)
 ```
 
+#### Stage 3
+```{python}
+#| code-summary: "Final fitting for CatBoost model"
+
+def cat_objective_stage3(best_params):
+    params = {
+        "task_type": "GPU",
+        "metric_period": 20,
+        "loss_function": "Logloss",
+        "eval_metric": "AUC",
+        "early_stopping_rounds": 50,
+        "iterations": 1000,
+        "verbose": 0,
+        "use_best_model": True,
+    }
+
+    split_folder = 'training/catboost/stage3/data'
+    cd_file = './higgs_data/train.cd'
+
+    train_set, valid_set = file_train_test_split('higgs_data/train.parquet', split_folder, test_size=0.2)
+    
+    dtrain = cat.Pool(train_set, column_description=cd_file, has_header=True, delimiter=',')
+    dvalid = cat.Pool(valid_set, column_description=cd_file, has_header=True, delimiter=',')
+
+    baseline_model = cat.CatBoostClassifier(**params)
+    baseline_model.fit(
+        dtrain,
+        eval_set=dvalid,
+        column_description=cd_file,
+    )
+
+    baseline_model.save_model("models/baseline_cat.cbm", format="cbm")
+
+    params.update(best_params)
+
+    tuned_model = cat.CatBoostClassifier(**params)
+    tuned_model.fit(
+        dtrain,
+        eval_set=dvalid,
+        column_description=cd_file,
+    )
+
+    tuned_model.save_model("models/tuned_cat.cbm", format="cbm")
+
+
+```
+
+
+```{python}
+#| echo: false
+
+
+best_params = {**cat_study1.best_params, **cat_study2.best_params}
+
+conditions = [
+    not os.path.exists("models/baseline_cat.cbm"), 
+    not os.path.exists("models/tuned_cat.cbm"),
+    FORCE_RERUN
+]
+
+if any(conditions):
+    cat_objective_stage3(best_params)
+
+_ = gc.collect()
+```
+
 :::
 
 ## Results
 
+The graph below shows that the performance difference between the baseline and tuned models is relatively modest. However, the XGBoost model displays noticeable signs of overfitting. Some variance between models was also observed during preliminary testing, likely due to the lack of cross-validation (a trade-off made for efficiency). Still, the results are encouraging. The CatBoost model, for instance, saw an increase in test AUC from 0.81 to 0.84. While Optuna shows clear potential for improving model performance, applying it within a more rigorous validation framework will be important moving forward.
+```{python}
+#| echo: false
+
+
+if not os.path.exists('./higgs_data/aucs.csv'):
+    from lazy_model_evaluation import evaluate_all_models
+
+    datasets = ('./higgs_data/train.parquet', './higgs_data/test.parquet')
+    evaluate_all_models('./models/', datasets)
+
+df = pd.read_csv('./higgs_data/aucs.csv')
+
+pivot = df.pivot(index='model', columns='data', values='auc').reset_index()
+
+pivot['hyperparm_tuned'] = pivot['model'].str.split('_').str[0]
+pivot['model_type'] = pivot['model'].str.split('_').str[1]
+pivot.columns.name = None
+
+```
+
+```{python}
+#| echo: false
+
+fig, ax = plt.subplots(figsize=(10, 6))
+
+palette = sns.color_palette("Paired")
+# First: Train bars (background layer)
+sns.barplot(
+    x='model_type', y='train', hue='hyperparm_tuned', data=pivot,
+    ax=ax, palette=palette[4:6], edgecolor='black', zorder=1
+)
+
+# Then: Test bars (foreground layer)
+sns.barplot(
+    x='model_type', y='test', hue='hyperparm_tuned', data=pivot,
+    ax=ax, palette=palette[:2], edgecolor='black', zorder=2
+)
+
+# Put grid behind
+ax.set_axisbelow(True)
+ax.grid(True, which='major', axis='y', linestyle='--', zorder=0)
+
+ax.set_xticks(range(3))
+ax.set_xticklabels(['CatBoost', 'LightGBM', 'XGBoost'])
+ax.set_xlabel('Model Type')
+ax.set_ylabel('AUC')
+ax.set_title('Test AUC and Train-Test Difference: Baseline vs. Tuned Models')
+
+
+handles, labels = ax.get_legend_handles_labels()
+custom_labels = ['Train - Baseline', 'Train - Tuned', 'Test - Baseline', 'Test - Tuned']
+ax.legend(handles, custom_labels, title="Model Instance")
+sns.move_legend(ax, "right", bbox_to_anchor=(1.25, 0.85), frameon=False)
+
+plt.tight_layout()
+plt.show()
+
+
+# Show raw numbers as table
+display(HTML(pivot[['model_type', 'hyperparm_tuned', 'train', 'test']].to_html()))
+```
+
+In conclusion, I'd say optuna is a wonderful tool to find a great hyperparameter configuration for your models. It's easy to use and can be integrated into your workflow with just a few lines of code. Highly recommend it to anyone looking to improve their model performance.

@@ -1,5 +1,9 @@
 ./higgs_data/*
 ./training/*
+./test/*
 ./__pycache__/*
 ./catboost_info/*
 ./models/*
+
+./plots/*
+.gitignore
