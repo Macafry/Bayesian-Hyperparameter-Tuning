@@ -23,14 +23,13 @@ This project explores Bayesian optimization for hyperparameter tuning using [Opt
 .
 ├── higgs_data/                     # Dataset in Parquet + CD files
 ├── models/                         # Saved baseline and tuned models
-├── plots/boxplotviolins/           # Feature-wise violin plots
 ├── studies/                        # Saved Optuna study objects (.pkl)
 ├── training/                       # Temporary training data splits
+├── docs/                           # Rendered analysis html & files
 ├── lazy_model_evaluation.py        # Helper to evaluate trained models
 ├── manual_splits.py                # Custom file-based train/test splits
 ├── download_data.py                # Script to download and convert HIGGS dataset
 ├── bayesian_hyperparameters.qmd    # File containing the analysis
-├── bayesian_hyperparameters.html   # Rendered version of the analysis
 └── README.qmd                      # This file
 ```
 
