@@ -48,7 +48,7 @@ This project explores Bayesian optimization for hyperparameter tuning using [Opt
 2. Run the notebook or render it via Quarto:
 
    ```bash
-   quarto render bayesian_hyperparameters.qmd
+   quarto render bayesian_hyperparameters.qmd --output index.html
    ```
 
 3. If running from a clean slate, set `FORCE_RERUN = True` in the top cell to regenerate all files.

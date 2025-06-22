@@ -1,4 +1,6 @@
 ---
+title: Using Bayesian Optimization for Hyperparameter Tuning on Gradient Boosting Machines
+author: "Ian McFarlane"
 format: 
   html:
     code-fold: true
